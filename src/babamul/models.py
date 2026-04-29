@@ -22,9 +22,13 @@ from .raw_models import (
 
 __all__ = [
     "AlertCutouts",
+    "BoomFilter",
     "CrossMatches",
     "EnrichedLsstAlert",
     "EnrichedZtfAlert",
+    "FilterTestCount",
+    "FilterTestResult",
+    "FilterVersion",
     "LsstAlert",
     "LsstCandidate",
     "NedMatch",
@@ -38,6 +42,50 @@ __all__ = [
 ]
 
 # --- API response models ---
+
+
+# --- Filter models ---
+
+
+class FilterVersion(BaseModel):
+    """A single version of a filter's pipeline."""
+
+    fid: str
+    pipeline: str  # JSON string of the MongoDB aggregation pipeline
+    changelog: str | None = None
+    created_at: float
+
+
+class BoomFilter(BaseModel):
+    """A saved filter in the BOOM system."""
+
+    id: str = Field(
+        ..., validation_alias=AliasChoices("id", "_id")
+    )
+    name: str
+    description: str | None = None
+    survey: str
+    active: bool
+    active_fid: str
+    permissions: dict = Field(default_factory=dict)
+    user_id: str
+    fv: list[FilterVersion] = Field(default_factory=list)
+    created_at: float
+    updated_at: float
+
+
+class FilterTestResult(BaseModel):
+    """Results from testing a filter pipeline against real alerts."""
+
+    pipeline: list[dict] = Field(default_factory=list)
+    results: list[dict] = Field(default_factory=list)
+
+
+class FilterTestCount(BaseModel):
+    """Count of alerts matching a filter pipeline."""
+
+    count: int
+    pipeline: list[dict] = Field(default_factory=list)
 
 
 class AlertCutouts(BaseModel):

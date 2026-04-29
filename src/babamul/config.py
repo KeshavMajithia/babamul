@@ -13,6 +13,12 @@ API_URLS = {
     "production": "https://babamul.caltech.edu/api/babamul",
 }
 
+# BOOM main API URLs (for filter management and admin operations)
+BOOM_API_URLS = {
+    "local": "http://localhost:4000/api",
+    "production": "https://babamul.caltech.edu/api",
+}
+
 
 def get_base_url() -> str:
     """Get the API base URL based on the BABAMUL_ENV environment variable.
@@ -25,6 +31,24 @@ def get_base_url() -> str:
             f"Invalid BABAMUL_ENV value: {env}. Must be one of {list(API_URLS.keys())}."
         )
     return API_URLS[env]
+
+
+def get_boom_api_url() -> str:
+    """Get the BOOM main API base URL.
+
+    Can be overridden with the BOOM_API_BASE_URL environment variable
+    (e.g. for NRP deployments). Otherwise falls back to the BABAMUL_ENV
+    setting.
+    """
+    override = os.environ.get("BOOM_API_BASE_URL")
+    if override:
+        return override.rstrip("/")
+    env = os.getenv("BABAMUL_ENV", "production").lower()
+    if env not in BOOM_API_URLS:
+        raise ValueError(
+            f"Invalid BABAMUL_ENV value: {env}. Must be one of {list(BOOM_API_URLS.keys())}."
+        )
+    return BOOM_API_URLS[env]
 
 
 @dataclass

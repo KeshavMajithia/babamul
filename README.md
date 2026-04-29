@@ -242,6 +242,64 @@ BABAMUL_API_TOKEN=your_api_token
 
 Most examples and tests will automatically load credentials from `.env` using `python-dotenv`.
 
+## Filter Interface
+
+Babamul now provides a programmatic interface to the BOOM backend for managing and testing alert filters. This allows you to construct MongoDB aggregation pipelines and run them against live data without deploying a full SkyPortal instance.
+
+### Programmatic API
+
+You can create, retrieve, and test filters programmatically. 
+
+```python
+import babamul
+
+# 1. Login to the BOOM API (requires Admin credentials)
+babamul.login("admin", "your_admin_password")
+
+# 2. Test a filter pipeline against live data
+pipeline = [
+    {
+        "$match": {
+            "candidate.drb": {"$gt": 0.5},
+            "candidate.magpsf": {"$lt": 19.0},
+        }
+    },
+    {
+        "$project": {
+            "_id": 1,
+            "objectId": 1,
+            "candidate.ra": 1,
+            "candidate.dec": 1,
+            "candidate.magpsf": 1,
+            "candidate.drb": 1,
+            "candidate.jd": 1,
+        }
+    },
+]
+
+# Get a count of matching alerts
+count_result = babamul.get_filter_count(
+    pipeline=pipeline,
+    survey="ZTF",
+    permissions={"ZTF": [1]}
+)
+print(f"Matched {count_result.count} alerts")
+
+# Fetch the actual alert documents
+results = babamul.test_filter(
+    pipeline=pipeline,
+    survey="ZTF",
+    permissions={"ZTF": [1]},
+    limit=10
+)
+for alert in results:
+    print(alert)
+```
+
+### Web UI Sandbox
+
+A standalone graphical interface is available to build and test pipelines interactively. See `webapp/README.md` for instructions on how to run or deploy the Filter Tester UI.
+
 ## Acknowledgments
 
 The Babamul alerts broker and BOOM software infrastructure (du Laz et al. 2026) is co-developed by the California Institute of Technology and the University of Minnesota. This work acknowledges support from the National Science Foundation through AST Award No. 2432476 (PI Kasliwal; co-PI Coughlin) and leverages experience from the Zwicky Transient Facility (co-PIs Graham and Kasliwal).

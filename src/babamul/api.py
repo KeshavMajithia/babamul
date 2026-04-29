@@ -12,11 +12,14 @@ import httpx
 from astropy.coordinates import SkyCoord
 from astropy.table import Table
 
-from .config import get_base_url
+from .config import get_base_url, get_boom_api_url
 from .exceptions import APIAuthenticationError, APIError, APINotFoundError
 from .models import (
     AlertCutouts,
+    BoomFilter,
     CrossMatches,
+    FilterTestCount,
+    FilterTestResult,
     LsstAlert,
     ObjectSearchResult,
     ObjPhotometry,
@@ -767,3 +770,484 @@ def get_profile() -> UserProfile:
     response = _request("GET", "/profile")
     data = response.get("data", response)
     return UserProfile.model_validate(data)
+
+
+# ---------------------------------------------------------------------------
+# BOOM main API helpers (for filter management)
+# ---------------------------------------------------------------------------
+
+
+def _resolve_boom_token(token: str | None = None) -> str:
+    """Resolve a BOOM main API token.
+
+    Priority: explicit token > BOOM_API_TOKEN env var.
+    """
+    resolved = token or os.environ.get("BOOM_API_TOKEN")
+    if not resolved:
+        raise APIAuthenticationError(
+            "No BOOM API token provided. Either pass a token from login(), "
+            "or set the BOOM_API_TOKEN environment variable.",
+            status_code=401,
+        )
+    return resolved
+
+
+def _boom_request(
+    method: str,
+    endpoint: str,
+    *,
+    token: str | None = None,
+    params: dict[str, Any] | None = None,
+    json: dict[str, Any] | None = None,
+    data: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Make an authenticated request to the BOOM main API.
+
+    Parameters
+    ----------
+    method : str
+        HTTP method.
+    endpoint : str
+        API endpoint path (e.g. ``/filters``).
+    token : str | None
+        Bearer token. If None, resolved from env.
+    params : dict | None
+        Query parameters.
+    json : dict | None
+        JSON body.
+    data : dict | None
+        Form data (used for /auth login).
+    """
+    url = f"{get_boom_api_url()}{endpoint}"
+    headers: dict[str, str] = {}
+
+    # /auth endpoint uses form-encoded data, no bearer token needed
+    if endpoint != "/auth":
+        resolved_token = _resolve_boom_token(token)
+        headers["Authorization"] = f"Bearer {resolved_token}"
+        headers["Content-Type"] = "application/json"
+
+    try:
+        response = httpx.request(
+            method,
+            url,
+            params=params,
+            json=json,
+            data=data,
+            headers=headers,
+            timeout=60.0,
+        )
+    except httpx.RequestError as e:
+        raise APIError(f"BOOM API request failed: {e}") from e
+
+    if response.status_code == 401:
+        raise APIAuthenticationError(
+            "BOOM API authentication failed. Check your token or credentials.",
+            status_code=401,
+        )
+    if response.status_code == 404:
+        raise APINotFoundError(
+            f"Resource not found: {endpoint}",
+            status_code=404,
+        )
+    if response.status_code >= 400:
+        try:
+            error_data = response.json()
+            message = error_data.get("message", error_data.get("error_description", response.text))
+        except Exception:
+            message = response.text
+        raise APIError(
+            f"BOOM API error ({response.status_code}): {message}",
+            status_code=response.status_code,
+        )
+
+    return cast(dict[str, Any], response.json())
+
+
+# ---------------------------------------------------------------------------
+# Auth
+# ---------------------------------------------------------------------------
+
+
+def login(
+    username: str,
+    password: str,
+    base_url: str | None = None,
+) -> str:
+    """Authenticate with the BOOM API and return a JWT token.
+
+    Parameters
+    ----------
+    username : str
+        BOOM admin username.
+    password : str
+        BOOM admin password.
+    base_url : str | None
+        Override the BOOM API URL for this call.
+
+    Returns
+    -------
+    str
+        JWT access token for subsequent API calls.
+    """
+    url = base_url.rstrip("/") if base_url else get_boom_api_url()
+    try:
+        response = httpx.post(
+            f"{url}/auth",
+            data={"username": username, "password": password},
+            timeout=30.0,
+        )
+    except httpx.RequestError as e:
+        raise APIError(f"Login request failed: {e}") from e
+
+    if response.status_code == 401:
+        raise APIAuthenticationError(
+            "Login failed: invalid username or password.",
+            status_code=401,
+        )
+    if response.status_code >= 400:
+        raise APIError(
+            f"Login error ({response.status_code}): {response.text}",
+            status_code=response.status_code,
+        )
+
+    result = response.json()
+    return cast(str, result["access_token"])
+
+
+# ---------------------------------------------------------------------------
+# Filter CRUD
+# ---------------------------------------------------------------------------
+
+
+def get_filters(token: str | None = None) -> list[BoomFilter]:
+    """List all filters for the authenticated user.
+
+    Parameters
+    ----------
+    token : str | None
+        BOOM API token. Falls back to BOOM_API_TOKEN env var.
+
+    Returns
+    -------
+    list[BoomFilter]
+        List of the user's saved filters.
+    """
+    response = _boom_request("GET", "/filters", token=token)
+    data = response.get("data", [])
+    return [BoomFilter.model_validate(f) for f in data]
+
+
+def get_filter(filter_id: str, token: str | None = None) -> BoomFilter:
+    """Get a single filter by ID.
+
+    Parameters
+    ----------
+    filter_id : str
+        The filter UUID.
+    token : str | None
+        BOOM API token.
+
+    Returns
+    -------
+    BoomFilter
+        The requested filter.
+    """
+    response = _boom_request("GET", f"/filters/{filter_id}", token=token)
+    data = response.get("data", response)
+    return BoomFilter.model_validate(data)
+
+
+def create_filter(
+    name: str,
+    pipeline: list[dict[str, Any]],
+    survey: Survey,
+    permissions: dict[str, list[int]],
+    *,
+    description: str | None = None,
+    token: str | None = None,
+) -> BoomFilter:
+    """Create a new filter.
+
+    Parameters
+    ----------
+    name : str
+        Human-readable filter name.
+    pipeline : list[dict]
+        MongoDB aggregation pipeline stages.
+    survey : Survey
+        Target survey ("ZTF" or "LSST").
+    permissions : dict
+        Survey permission mapping (e.g. {"ZTF": [1, 2, 3]}).
+    description : str | None
+        Optional description.
+    token : str | None
+        BOOM API token.
+
+    Returns
+    -------
+    BoomFilter
+        The newly created filter.
+    """
+    body: dict[str, Any] = {
+        "name": name,
+        "pipeline": pipeline,
+        "survey": survey,
+        "permissions": permissions,
+    }
+    if description is not None:
+        body["description"] = description
+
+    response = _boom_request("POST", "/filters", json=body, token=token)
+    data = response.get("data", response)
+    return BoomFilter.model_validate(data)
+
+
+def update_filter(
+    filter_id: str,
+    *,
+    name: str | None = None,
+    description: str | None = None,
+    active: bool | None = None,
+    active_fid: str | None = None,
+    permissions: dict[str, list[int]] | None = None,
+    token: str | None = None,
+) -> None:
+    """Update a filter's metadata.
+
+    Parameters
+    ----------
+    filter_id : str
+        The filter UUID.
+    name : str | None
+        New name.
+    description : str | None
+        New description.
+    active : bool | None
+        Enable or disable the filter.
+    active_fid : str | None
+        Set the active pipeline version.
+    permissions : dict | None
+        Updated permissions.
+    token : str | None
+        BOOM API token.
+    """
+    body: dict[str, Any] = {}
+    if name is not None:
+        body["name"] = name
+    if description is not None:
+        body["description"] = description
+    if active is not None:
+        body["active"] = active
+    if active_fid is not None:
+        body["active_fid"] = active_fid
+    if permissions is not None:
+        body["permissions"] = permissions
+
+    _boom_request("PATCH", f"/filters/{filter_id}", json=body, token=token)
+
+
+def add_filter_version(
+    filter_id: str,
+    pipeline: list[dict[str, Any]],
+    *,
+    changelog: str | None = None,
+    set_as_active: bool = True,
+    token: str | None = None,
+) -> str:
+    """Add a new pipeline version to an existing filter.
+
+    Parameters
+    ----------
+    filter_id : str
+        The filter UUID.
+    pipeline : list[dict]
+        New MongoDB aggregation pipeline.
+    changelog : str | None
+        Description of what changed.
+    set_as_active : bool
+        Whether to make this the active version (default True).
+    token : str | None
+        BOOM API token.
+
+    Returns
+    -------
+    str
+        The new filter version ID (fid).
+    """
+    body: dict[str, Any] = {
+        "pipeline": pipeline,
+        "set_as_active": set_as_active,
+    }
+    if changelog is not None:
+        body["changelog"] = changelog
+
+    response = _boom_request(
+        "POST", f"/filters/{filter_id}/versions", json=body, token=token
+    )
+    data = response.get("data", response)
+    return cast(str, data["fid"])
+
+
+# ---------------------------------------------------------------------------
+# Filter testing
+# ---------------------------------------------------------------------------
+
+
+def test_filter(
+    pipeline: list[dict[str, Any]],
+    survey: Survey,
+    permissions: dict[str, list[int]],
+    *,
+    start_jd: float | None = None,
+    end_jd: float | None = None,
+    object_ids: list[str] | None = None,
+    candids: list[str] | None = None,
+    sort_by: str | None = None,
+    sort_order: str | None = None,
+    limit: int | None = None,
+    token: str | None = None,
+) -> FilterTestResult:
+    """Test a filter pipeline against real alert data.
+
+    At least one of (start_jd + end_jd), object_ids, or candids must be
+    provided to scope the test.
+
+    Parameters
+    ----------
+    pipeline : list[dict]
+        MongoDB aggregation pipeline stages.
+    survey : Survey
+        Target survey.
+    permissions : dict
+        Survey permissions.
+    start_jd : float | None
+        Start Julian Date.
+    end_jd : float | None
+        End Julian Date (max 7 JD window).
+    object_ids : list[str] | None
+        Filter to specific object IDs (max 1000).
+    candids : list[str] | None
+        Filter to specific candidate IDs (max 100000).
+    sort_by : str | None
+        Field to sort results by.
+    sort_order : str | None
+        "ascending" or "descending".
+    limit : int | None
+        Max number of results.
+    token : str | None
+        BOOM API token.
+
+    Returns
+    -------
+    FilterTestResult
+        The compiled pipeline and matching alert documents.
+    """
+    body: dict[str, Any] = {
+        "pipeline": pipeline,
+        "survey": survey,
+        "permissions": permissions,
+    }
+    if start_jd is not None:
+        body["start_jd"] = start_jd
+    if end_jd is not None:
+        body["end_jd"] = end_jd
+    if object_ids is not None:
+        body["object_ids"] = object_ids
+    if candids is not None:
+        body["candids"] = candids
+    if sort_by is not None:
+        body["sort_by"] = sort_by
+    if sort_order is not None:
+        body["sort_order"] = sort_order
+    if limit is not None:
+        body["limit"] = limit
+
+    response = _boom_request("POST", "/filters/test", json=body, token=token)
+    data = response.get("data", response)
+    return FilterTestResult.model_validate(data)
+
+
+def test_filter_count(
+    pipeline: list[dict[str, Any]],
+    survey: Survey,
+    permissions: dict[str, list[int]],
+    *,
+    start_jd: float | None = None,
+    end_jd: float | None = None,
+    object_ids: list[str] | None = None,
+    candids: list[str] | None = None,
+    token: str | None = None,
+) -> FilterTestCount:
+    """Count how many alerts match a filter pipeline.
+
+    Parameters
+    ----------
+    pipeline : list[dict]
+        MongoDB aggregation pipeline stages.
+    survey : Survey
+        Target survey.
+    permissions : dict
+        Survey permissions.
+    start_jd : float | None
+        Start Julian Date.
+    end_jd : float | None
+        End Julian Date (max 7 JD window).
+    object_ids : list[str] | None
+        Filter to specific object IDs.
+    candids : list[str] | None
+        Filter to specific candidate IDs.
+    token : str | None
+        BOOM API token.
+
+    Returns
+    -------
+    FilterTestCount
+        Count and the compiled pipeline.
+    """
+    body: dict[str, Any] = {
+        "pipeline": pipeline,
+        "survey": survey,
+        "permissions": permissions,
+    }
+    if start_jd is not None:
+        body["start_jd"] = start_jd
+    if end_jd is not None:
+        body["end_jd"] = end_jd
+    if object_ids is not None:
+        body["object_ids"] = object_ids
+    if candids is not None:
+        body["candids"] = candids
+
+    response = _boom_request(
+        "POST", "/filters/test/count", json=body, token=token
+    )
+    data = response.get("data", response)
+    return FilterTestCount.model_validate(data)
+
+
+def get_filter_schema(
+    survey: Survey,
+    token: str | None = None,
+) -> dict[str, Any]:
+    """Get the Avro schema of fields available at filtering time.
+
+    This shows all the fields that can be used in filter pipelines
+    (candidate, classifications, properties, coordinates, etc.).
+
+    Parameters
+    ----------
+    survey : Survey
+        Target survey ("ZTF" or "LSST").
+    token : str | None
+        BOOM API token.
+
+    Returns
+    -------
+    dict
+        Avro schema describing filterable fields.
+    """
+    response = _boom_request(
+        "GET", f"/filters/schemas/{survey}", token=token
+    )
+    return response.get("data", response)

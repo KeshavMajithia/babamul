@@ -4,11 +4,20 @@ streams and interacting with the Babamul API.
 
 from . import api, topics
 from .api import (
+    add_filter_version,
+    create_filter,
     get_alerts,
     get_cutouts,
+    get_filter,
+    get_filter_schema,
+    get_filters,
     get_object,
     get_profile,
+    login,
     search_objects,
+    test_filter,
+    test_filter_count,
+    update_filter,
 )
 from .consumer import AlertConsumer
 from .exceptions import (
@@ -22,6 +31,10 @@ from .exceptions import (
     DeserializationError,
 )
 from .models import (
+    BoomFilter,
+    FilterTestCount,
+    FilterTestResult,
+    FilterVersion,
     LsstAlert,
     LsstCandidate,
     ZtfAlert,
@@ -32,11 +45,20 @@ from .models import (
 __all__ = [
     "api",
     "topics",
+    "add_filter_version",
+    "create_filter",
     "get_alerts",
     "get_cutouts",
+    "get_filter",
+    "get_filter_schema",
+    "get_filters",
     "get_object",
     "get_profile",
+    "login",
     "search_objects",
+    "test_filter",
+    "test_filter_count",
+    "update_filter",
     "AlertConsumer",
     "APIAuthenticationError",
     "APIError",
@@ -46,6 +68,10 @@ __all__ = [
     "BabamulError",
     "ConfigurationError",
     "DeserializationError",
+    "BoomFilter",
+    "FilterTestCount",
+    "FilterTestResult",
+    "FilterVersion",
     "LsstAlert",
     "LsstCandidate",
     "ZtfAlert",
